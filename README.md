@@ -1,5 +1,7 @@
 # display-weather
 
+![Weather display running on the Feather](pic.jpg)
+
 ESP32-S2 firmware that turns an [Adafruit Feather ESP32-S2 Reverse TFT](https://www.adafruit.com/product/5345) into a desktop weather display. Shows the current temperature, conditions, today's high/low, and chance of precipitation on the 240×135 TFT, refreshed from OpenWeatherMap.
 
 ## Features
