@@ -4,3 +4,8 @@
 *.swp
 .idea/
 build/
+
+# Proprietary font source + generated GFX bitmap headers.
+# Regenerate with scripts/gen_fonts.sh (see README "Fonts").
+/HelveticaNeue.ttc
+/src/fonts/HelveticaNeue*pt7b.h

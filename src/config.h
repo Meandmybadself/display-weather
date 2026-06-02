@@ -16,42 +16,50 @@ constexpr uint16_t TFT_HEIGHT        = 135;
 constexpr uint8_t  TFT_ROTATION      = 3;
 
 // --- Captive portal ---
-constexpr const char* PORTAL_AP_SSID = "StockTicker-Setup";
+constexpr const char* PORTAL_AP_SSID = "WeatherDisplay-Setup";
 constexpr uint16_t PORTAL_TIMEOUT_S  = 600;  // 10 min then reboot to retry
 
 // --- Defaults the portal pre-fills ---
-constexpr const char* DEFAULT_SYMBOLS = "AAPL,MSFT,GOOGL,NVDA,TSLA";
-constexpr const char* DEFAULT_DWELL_S = "8";
+constexpr const char* DEFAULT_LAT         = "";
+constexpr const char* DEFAULT_LON         = "";
+constexpr const char* DEFAULT_API_KEY     = "";
+constexpr const char* DEFAULT_WIGLE_TOKEN = "";
+constexpr const char* DEFAULT_UPDATE_MIN  = "30";
 
 // --- Bounds ---
-constexpr uint8_t  MAX_SYMBOLS       = 16;
-constexpr uint8_t  MAX_SYMBOL_LEN    = 10;
-constexpr uint16_t MIN_DWELL_S       = 2;
-constexpr uint16_t MAX_DWELL_S       = 600;
+constexpr uint16_t MIN_UPDATE_MIN = 5;
+constexpr uint16_t MAX_UPDATE_MIN = 240;
 
 // --- Network / data ---
-constexpr uint32_t REFRESH_INTERVAL_MS = 60UL * 1000UL;
-constexpr uint32_t STALE_THRESHOLD_MS  = 5UL * 60UL * 1000UL;
 // HTTP timeout MUST stay below the loopTask WDT (~5s) since fetch is called from loop().
-constexpr uint32_t HTTP_TIMEOUT_MS     = 4000;
-constexpr uint32_t FETCH_STEP_GAP_MS   = 250;  // pacing between per-symbol fetches
-constexpr const char* YAHOO_HOST       = "query1.finance.yahoo.com";
-constexpr const char* YAHOO_PATH_FMT   = "/v8/finance/chart/%s?interval=1d&range=1d";
-constexpr const char* USER_AGENT       = "Mozilla/5.0 (StockTickerESP32)";
+constexpr uint32_t HTTP_TIMEOUT_MS = 4000;
+constexpr const char* OWM_HOST     = "api.openweathermap.org";
+constexpr const char* OWM_PATH_FMT =
+    "/data/3.0/onecall?lat=%.6f&lon=%.6f&units=imperial&exclude=minutely,hourly&appid=%s";
+constexpr const char* USER_AGENT   = "Mozilla/5.0 (WeatherDisplayESP32)";
 
-// --- NTP ---
-constexpr const char* NTP_SERVER       = "pool.ntp.org";
-constexpr long NTP_OFFSET_SECONDS      = 0;  // display in UTC; user can edit if they want local
-constexpr unsigned long NTP_UPDATE_MS  = 60UL * 60UL * 1000UL;  // hourly resync
+// --- WiGLE (optional auto-geolocation from nearby BSSIDs) ---
+constexpr const char* WIGLE_HOST       = "api.wigle.net";
+constexpr const char* WIGLE_SEARCH_FMT = "/api/v2/network/search?netid=%s";
+constexpr uint8_t     MAX_BSSID_QUERY  = 5;   // top-N strongest nearby networks to query
+
+// --- Stage-2 setup server ---
+constexpr const char* MDNS_HOSTNAME = "weatherdisplay";   // → weatherdisplay.local
 
 // --- Reset-trigger detection ---
-constexpr uint32_t BOOT_HOLD_MS        = 2000;
+constexpr uint32_t BOOT_HOLD_MS = 2000;
+
+// --- Connection robustness ---
+// A wifi failure when we already have valid credentials + config is treated as
+// transient (weak signal, AP rebooting): we retry rather than forcing re-onboarding.
+constexpr uint32_t WIFI_CONNECT_ATTEMPT_MS = 8000;   // per association attempt at boot
+constexpr uint8_t  WIFI_CONNECT_ATTEMPTS   = 4;      // boot attempts before falling back
+constexpr uint32_t WIFI_RECONNECT_MS       = 15000;  // re-issue join while disconnected in loop()
+constexpr uint32_t WEATHER_RETRY_MS        = 30000;  // refetch sooner until a fetch succeeds
 
 // --- Colors (RGB565) ---
-constexpr uint16_t COLOR_BG            = 0x0000;   // black
-constexpr uint16_t COLOR_FG            = 0xFFFF;   // white
-constexpr uint16_t COLOR_DIM           = 0x7BEF;   // gray
-constexpr uint16_t COLOR_UP            = 0x07E0;   // green
-constexpr uint16_t COLOR_DOWN          = 0xF800;   // red
-constexpr uint16_t COLOR_ACCENT        = 0x07FF;   // cyan
-constexpr uint16_t COLOR_WARN          = 0xFD20;   // amber
+constexpr uint16_t COLOR_BG     = 0x0000;   // black
+constexpr uint16_t COLOR_FG     = 0xFFFF;   // white
+constexpr uint16_t COLOR_DIM    = 0x7BEF;   // gray
+constexpr uint16_t COLOR_ACCENT = 0x07FF;   // cyan
+constexpr uint16_t COLOR_WARN   = 0xFD20;   // amber

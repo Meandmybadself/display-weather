@@ -1,17 +1,16 @@
-# display-stock
+# display-weather
 
-![Stock ticker display running on the Feather](pic.jpg)
-
-ESP32-S2 firmware that turns an [Adafruit Feather ESP32-S2 Reverse TFT](https://www.adafruit.com/product/5345) into a desktop stock ticker. Rotates through a configurable list of symbols, showing price and daily percent change on the 240×135 TFT.
+ESP32-S2 firmware that turns an [Adafruit Feather ESP32-S2 Reverse TFT](https://www.adafruit.com/product/5345) into a desktop weather display. Shows the current temperature, conditions, today's high/low, and chance of precipitation on the 240×135 TFT, refreshed from OpenWeatherMap.
 
 ## Features
 
-- First-boot captive-portal setup: collects wifi credentials, the symbol list, and per-symbol dwell seconds in one form
-- Quotes from Yahoo Finance, refreshed every 60 seconds
-- Auto-rotation with manual prev/next via the side buttons
-- NTP-synced clock and wifi indicator in a small status bar
-- Stale-data marker if a symbol fails to refresh
-- Hold the BOOT button for two seconds at power-on to wipe config and re-enter setup
+- First-boot captive-portal setup: wifi, latitude/longitude, OpenWeatherMap API key, refresh interval
+- Pulls `/data/3.0/onecall` (current + today's daily) from `api.openweathermap.org`
+- Configurable refresh interval (5–240 minutes, default 30)
+- Tiny wifi-status dot in the top corner (no clock, no city name — clean display)
+- Stale-data marker (`*`) if a refresh fails for longer than 2× the interval
+- Press **D0** at any time to force an immediate refresh
+- Hold **D0** for two seconds at power-on to wipe config and re-enter setup
 
 ## Hardware
 
@@ -43,44 +42,84 @@ The S2 has native USB instead of a USB-to-serial chip, so the automatic `1200bps
 
 The port name will change (e.g. `/dev/cu.usbmodem101` → `/dev/cu.usbmodem01`). Re-run `scripts/flash.sh`; press **RESET** once when it finishes to run the new firmware.
 
+## Fonts
+
+The display renders in **Helvetica Neue**, converted to Adafruit-GFX bitmap fonts. Because Helvetica Neue is Apple's proprietary font, neither the source `HelveticaNeue.ttc` nor the generated headers (`src/fonts/HelveticaNeue*pt7b.h`) are committed — they're gitignored. Only the hand-written aggregator `src/fonts/helvetica_neue.h` is tracked.
+
+So after cloning you must generate the font headers once before building:
+
+```sh
+# 1. Provide the font (macOS ships it):
+cp /System/Library/Fonts/HelveticaNeue.ttc .
+
+# 2. One-time tooling:
+brew install freetype
+pip3 install fonttools
+
+# 3. Fetch the Adafruit GFX library (which carries fontconvert), then generate:
+pio run                 # populates .pio/libdeps (safe to interrupt after it resolves deps)
+scripts/gen_fonts.sh    # writes src/fonts/HelveticaNeue{Regular8,Medium10,Bold26}pt7b.h
+```
+
+`scripts/gen_fonts.sh` builds Adafruit's `fontconvert`, splits the three weights it needs out of the `.ttc` (fontconvert only reads face 0 of a file), and rasterizes them. The three faces, and where they're used:
+
+| Header | Weight / size | Glyphs | Used for |
+|---|---|---|---|
+| `HelveticaNeueRegular8pt7b` | Regular 8pt | full ASCII | hints, footers, URLs |
+| `HelveticaNeueRegular9pt7b` | Regular 9pt | full ASCII | weather right column (low/high, precip, description) |
+| `HelveticaNeueMedium10pt7b` | Medium 10pt | full ASCII | headers, boot screens |
+| `HelveticaNeueBold30pt7b` | Bold 30pt | `*`–`:` only | factory-reset countdown digit |
+| `HelveticaNeueBold57pt7b` | Bold 57pt | `*`–`:` only | full-height temperature |
+
+To restyle (different weights, sizes, or glyph ranges), edit the `fontconvert` invocations at the bottom of `scripts/gen_fonts.sh` and re-run it. Substituting a different typeface only requires dropping in your own `HelveticaNeue.ttc`-equivalent and adjusting the face indices.
+
 ## First-boot setup
 
 1. After flashing, the TFT shows `Setup mode` with an AP name and `192.168.4.1`.
-2. From your phone or laptop, join the `StockTicker-Setup` open wifi network.
-3. The captive portal page opens automatically. Pick your home wifi, enter its password, edit the symbol list (`AAPL,MSFT,GOOGL,NVDA,TSLA` by default), and set the seconds-per-symbol dwell (default `8`).
-4. Save. The device reboots and starts displaying.
+2. From your phone or laptop, join the `WeatherDisplay-Setup` open wifi network.
+3. The captive portal page opens automatically. Pick your home wifi, enter its password, then fill in:
+   - **Latitude / Longitude** — e.g. `44.9778` / `-93.2650`. *Optional* if you provide a WiGLE token below.
+   - **OpenWeatherMap API key** — get one at <https://openweathermap.org/api>
+   - **WiGLE API token** *(optional)* — paste the "Encoded for use" string from your [WiGLE API token page](https://wigle.net/account). If lat/lon are blank, the device scans nearby BSSIDs after connecting and asks WiGLE to derive coordinates.
+   - **Update every N minutes** — default `30`
+4. Save. The device reboots, connects to wifi, optionally runs the WiGLE lookup, and starts displaying.
+
+You must provide either explicit lat/lon **or** a WiGLE token (or both — the explicit coords win).
 
 ## Buttons
 
 | Button | While running |
 |---|---|
 | **D0** (BOOT) | Force an immediate refresh |
-| **D1** | Previous symbol |
-| **D2** | Next symbol |
-| **D0 held at boot for 2s** | Factory reset (clears wifi + symbols, re-enters setup) |
+| **D0 held at boot for 2s** | Factory reset (clears wifi + weather config, re-enters setup) |
+
+D1 and D2 are unused.
 
 ## File layout
 
 ```
 src/
-  main.cpp           top-level state machine + loop
-  config.h           pins, colors, URLs, defaults
-  storage.h/.cpp     NVS-backed config (symbols, dwell)
-  wifi_setup.h/.cpp  WiFiManager wrapper + factory reset
-  stock_fetcher.h/.cpp  Yahoo v8 chart endpoint client (one fetch per loop tick)
-  display.h/.cpp     ST7789 drawing
-  buttons.h/.cpp     debounced edge-triggered button events
+  main.cpp              top-level state machine + loop
+  config.h              pins, colors, URLs, defaults
+  storage.h/.cpp        NVS-backed config (lat, lon, api_key, update_min)
+  wifi_setup.h/.cpp     WiFiManager wrapper + factory reset
+  weather_fetcher.h/.cpp OpenWeatherMap one-call client
+  display.h/.cpp        ST7789 drawing
+  buttons.h/.cpp        debounced edge-triggered button events
+  fonts/
+    helvetica_neue.h    aggregator (tracked); includes the generated headers below
+    HelveticaNeue*pt7b.h  generated GFX fonts (gitignored — see "Fonts")
 scripts/
-  flash.sh           wait for port, build, upload
-  monitor.sh         wait for port, open serial monitor
-  _wait_for_board.sh shared port-wait helper
+  flash.sh              wait for port, build, upload
+  monitor.sh            wait for port, open serial monitor
+  gen_fonts.sh          regenerate the GFX font headers from HelveticaNeue.ttc
+  _wait_for_board.sh    shared port-wait helper
 ```
 
 ## Caveats
 
-- **Yahoo Finance has no official free API.** This uses the unofficial `query1.finance.yahoo.com/v8/finance/chart/SYMBOL` endpoint. It has been stable for years but could break at any time.
 - **TLS uses `setInsecure()`** — no certificate validation. Reasonable for a personal device on a home LAN; do not deploy outside that threat model.
-- Times shown are UTC by default. Edit `NTP_OFFSET_SECONDS` in `src/config.h` to use local time.
+- The OpenWeatherMap free tier currently allows up to 1,000 One Call API requests per day. With the default 30-minute refresh that's 48 requests/day; even at the 5-minute minimum it's 288/day.
 
 ## License
 

@@ -1,18 +1,15 @@
 #include "storage.h"
 #include <Preferences.h>
+#include <cmath>
 
 namespace {
     Preferences prefs;
-    constexpr const char* NS = "stock";
-    constexpr const char* KEY_SYMBOLS = "symbols";
-    constexpr const char* KEY_DWELL   = "dwell";
-
-    String upper_trim(const String& in) {
-        String s = in;
-        s.trim();
-        s.toUpperCase();
-        return s;
-    }
+    constexpr const char* NS          = "weather";
+    constexpr const char* KEY_LAT     = "lat";
+    constexpr const char* KEY_LON     = "lon";
+    constexpr const char* KEY_API_KEY = "apikey";
+    constexpr const char* KEY_WIGLE   = "wigle";
+    constexpr const char* KEY_UPMIN   = "upmin";
 }
 
 namespace storage {
@@ -21,41 +18,41 @@ void begin() {
     prefs.begin(NS, false);
 }
 
-bool load(StockConfig& out) {
-    out.symbols_csv = prefs.getString(KEY_SYMBOLS, "");
-    out.dwell_s    = prefs.getUShort(KEY_DWELL, 0);
-    if (out.symbols_csv.length() == 0 || out.dwell_s == 0) {
+bool load(WeatherConfig& out) {
+    // NAN sentinel for "not set" since 0,0 is a valid (if unlikely) coordinate.
+    out.lat         = prefs.getFloat(KEY_LAT, NAN);
+    out.lon         = prefs.getFloat(KEY_LON, NAN);
+    out.api_key     = prefs.getString(KEY_API_KEY, "");
+    out.wigle_token = prefs.getString(KEY_WIGLE, "");
+    out.update_min  = prefs.getUShort(KEY_UPMIN, 0);
+
+    if (out.api_key.length() == 0 || out.update_min == 0) {
         return false;
     }
-    out.symbol_count = parse_symbols(out.symbols_csv, out.symbols, MAX_SYMBOLS);
-    return out.symbol_count > 0;
+    // Config is usable if we have explicit coords OR a WiGLE token to resolve them.
+    bool have_coords = !std::isnan(out.lat) && !std::isnan(out.lon);
+    bool have_wigle  = out.wigle_token.length() > 0;
+    return have_coords || have_wigle;
 }
 
-void save(const String& symbols_csv, uint16_t dwell_s) {
-    if (dwell_s < MIN_DWELL_S) dwell_s = MIN_DWELL_S;
-    if (dwell_s > MAX_DWELL_S) dwell_s = MAX_DWELL_S;
-    prefs.putString(KEY_SYMBOLS, symbols_csv);
-    prefs.putUShort(KEY_DWELL, dwell_s);
+void save(float lat, float lon, const String& api_key,
+          const String& wigle_token, uint16_t update_min) {
+    if (update_min < MIN_UPDATE_MIN) update_min = MIN_UPDATE_MIN;
+    if (update_min > MAX_UPDATE_MIN) update_min = MAX_UPDATE_MIN;
+    prefs.putFloat(KEY_LAT, lat);   // NAN is preserved
+    prefs.putFloat(KEY_LON, lon);
+    prefs.putString(KEY_API_KEY, api_key);
+    prefs.putString(KEY_WIGLE, wigle_token);
+    prefs.putUShort(KEY_UPMIN, update_min);
+}
+
+void save_location(float lat, float lon) {
+    prefs.putFloat(KEY_LAT, lat);
+    prefs.putFloat(KEY_LON, lon);
 }
 
 void clear() {
     prefs.clear();
-}
-
-uint8_t parse_symbols(const String& csv, String out[], uint8_t max) {
-    uint8_t count = 0;
-    int start = 0;
-    while (start <= (int)csv.length() && count < max) {
-        int comma = csv.indexOf(',', start);
-        String token = (comma < 0) ? csv.substring(start) : csv.substring(start, comma);
-        String sym = upper_trim(token);
-        if (sym.length() > 0 && sym.length() <= MAX_SYMBOL_LEN) {
-            out[count++] = sym;
-        }
-        if (comma < 0) break;
-        start = comma + 1;
-    }
-    return count;
 }
 
 } // namespace storage

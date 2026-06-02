@@ -1,46 +1,34 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
-#include <NTPClient.h>
+#include <cmath>
 
 #include "config.h"
 #include "storage.h"
 #include "buttons.h"
 #include "display.h"
 #include "wifi_setup.h"
-#include "stock_fetcher.h"
+#include "weather_fetcher.h"
+#include "geolocate.h"
+#include "setup_server.h"
 
 namespace {
-    StockConfig cfg;
+    WeatherConfig cfg;
 
-    int      current_index    = 0;
-    uint32_t last_advance_ms  = 0;
-    uint32_t last_refresh_ms  = 0;
-    uint32_t last_fetch_step_ms = 0;
-    uint32_t last_status_ms   = 0;
-    uint32_t dwell_ms         = 0;
+    uint32_t refresh_interval_ms = 0;
+    uint32_t stale_threshold_ms  = 0;
+    uint32_t last_refresh_ms     = 0;
+    uint32_t last_indicator_ms   = 0;
+    uint32_t last_reconnect_ms   = 0;
 
-    bool     refresh_active   = true;   // first cycle runs immediately at boot
-    bool     have_data        = false;
+    bool refresh_pending = true;     // run a refresh immediately at boot
+    bool have_data       = false;
+    bool last_fetch_ok   = false;
+    bool last_wifi_ok    = false;
 
-    WiFiUDP   ntp_udp;
-    NTPClient ntp(ntp_udp, NTP_SERVER, NTP_OFFSET_SECONDS, NTP_UPDATE_MS);
-
-    void redraw_current() {
-        if (have_data) {
-            display::draw_stock(stock_fetcher::quote(current_index));
-        } else {
-            display::draw_no_data();
-        }
-    }
-
-    void advance(bool forward) {
-        int next = forward
-            ? stock_fetcher::next_valid_index(current_index)
-            : stock_fetcher::prev_valid_index(current_index);
-        if (next < 0) return;
-        current_index = next;
-        display::draw_stock(stock_fetcher::quote(current_index));
+    void redraw() {
+        if (have_data) display::draw_weather(weather_fetcher::snapshot());
+        else           display::draw_no_data();
+        display::draw_wifi_indicator(WiFi.status() == WL_CONNECTED);
     }
 
     // Returns true if the user held D0 long enough to trigger a factory reset.
@@ -69,106 +57,132 @@ void setup() {
     display::begin();
     storage::begin();
 
-    display::show_boot_message("StockTicker", "booting...");
+    display::show_boot_message("WeatherDisplay", "booting...");
     delay(300);
 
     check_boot_reset_trigger();
 
-    if (!storage::load(cfg)) {
+    bool cfg_ok = storage::load(cfg);
+    Serial.printf("[main] storage::load=%d  api_key.len=%u  lat=%f lon=%f  wigle.len=%u  upmin=%u\n",
+                  (int)cfg_ok, (unsigned)cfg.api_key.length(),
+                  cfg.lat, cfg.lon, (unsigned)cfg.wigle_token.length(),
+                  (unsigned)cfg.update_min);
+
+    // Stage 1: no wifi credentials → captive portal.
+    if (!wifi_setup::has_saved_credentials()) {
+        Serial.println("[main] no saved wifi creds -> Stage 1 portal");
         wifi_setup::run_portal();  // does not return
     }
 
-    dwell_ms = (uint32_t)cfg.dwell_s * 1000UL;
+    // We have saved credentials. Try hard to connect before doing anything drastic.
+    display::show_centered_message("Connecting wifi");
+    bool wifi_ok = wifi_setup::connect(WIFI_CONNECT_ATTEMPT_MS, WIFI_CONNECT_ATTEMPTS);
 
-    display::show_boot_message("Connecting wifi", WiFi.SSID().c_str());
-    if (!wifi_setup::connect(20000)) {
-        display::show_boot_message("Wifi failed", "Entering setup");
-        delay(1500);
-        wifi_setup::run_portal();  // does not return
+    bool have_coords = !std::isnan(cfg.lat) && !std::isnan(cfg.lon);
+    bool config_complete = cfg.api_key.length() > 0
+                           && (have_coords || cfg.wigle_token.length() > 0);
+    Serial.printf("[main] wifi_ok=%d config_complete=%d have_coords=%d\n",
+                  (int)wifi_ok, (int)config_complete, (int)have_coords);
+
+    if (!wifi_ok) {
+        // No usable config yet → the user still has to onboard; the portal is the
+        // only way forward.
+        if (!config_complete) {
+            display::show_boot_message("Wifi failed", "Entering setup");
+            delay(1500);
+            wifi_setup::run_portal();  // does not return
+        }
+        // Config is complete but coordinates still need a WiGLE lookup, which needs
+        // wifi — nothing to display, so reboot and keep retrying (self-healing)
+        // instead of dead-ending in the portal over a transient outage.
+        if (!have_coords) {
+            display::show_boot_message("Wifi unavailable", "retrying...");
+            delay(3000);
+            ESP.restart();
+        }
+        // Complete config AND known coordinates: a wifi outage here is almost
+        // certainly transient. Boot into the normal loop showing "no data" and let
+        // loop() keep reconnecting — never force re-onboarding for a dropout.
+        Serial.println("[main] wifi down but config complete -> run, retry in loop()");
     }
 
-    display::show_boot_message("Loading prices", cfg.symbols_csv.c_str());
-    stock_fetcher::begin(cfg.symbols, cfg.symbol_count);
-    ntp.begin();
-    ntp.update();
+    // Stage 2: wifi up but weather config incomplete → local setup server.
+    if (wifi_ok && !config_complete) {
+        Serial.println("[main] -> Stage 2 setup server");
+        setup_server::run();  // does not return
+    }
+
+    refresh_interval_ms = (uint32_t)cfg.update_min * 60UL * 1000UL;
+    stale_threshold_ms  = refresh_interval_ms * 2;
+
+    // Resolve lat/lon via WiGLE if the user didn't enter coords directly.
+    if (!have_coords) {
+        display::show_boot_message("Locating...", "scanning nearby wifi");
+        float lat = 0.0f, lon = 0.0f;
+        if (geolocate::resolve(cfg.wigle_token, lat, lon)) {
+            cfg.lat = lat;
+            cfg.lon = lon;
+            storage::save_location(lat, lon);
+        } else {
+            display::show_boot_message("Locate failed", "Re-enter setup");
+            delay(2000);
+            setup_server::run();  // does not return
+        }
+    }
+
+    display::show_boot_message("Loading weather", nullptr);
+    weather_fetcher::begin(cfg.lat, cfg.lon, cfg.api_key);
 
     display::draw_no_data();
-
-    uint32_t now = millis();
-    last_advance_ms = now;
-    last_refresh_ms = now;
-    last_fetch_step_ms = 0;
-    last_status_ms = 0;
+    last_refresh_ms = millis();
 }
 
 void loop() {
     uint32_t now = millis();
 
-    // Schedule a new refresh cycle.
-    if (!refresh_active && now - last_refresh_ms >= REFRESH_INTERVAL_MS) {
-        refresh_active = true;
+    // Schedule a refresh. Until a fetch succeeds (and again after any failure) retry
+    // on the short interval, so a boot-time or temporary outage doesn't leave us
+    // blank/stale for up to update_min.
+    uint32_t due = last_fetch_ok ? refresh_interval_ms : WEATHER_RETRY_MS;
+    if (!refresh_pending && now - last_refresh_ms >= due) {
+        refresh_pending = true;
     }
 
-    // Step the refresh state machine — at most ONE HTTP request per loop iteration
-    // (bounded by HTTP_TIMEOUT_MS < the loopTask WDT).
-    if (refresh_active && now - last_fetch_step_ms >= FETCH_STEP_GAP_MS) {
-        bool cycle_done = stock_fetcher::refresh_next();
-        last_fetch_step_ms = now;
-
-        // First successful fetch in the lifetime of the device: pivot the display
-        // off the "loading" splash and start showing real data.
-        if (!have_data && stock_fetcher::has_any_valid()) {
-            int first = stock_fetcher::quote(current_index).valid
-                            ? current_index
-                            : stock_fetcher::next_valid_index(current_index);
-            if (first >= 0) current_index = first;
-            have_data = true;
-            redraw_current();
-            last_advance_ms = now;
-        }
-
-        if (cycle_done) {
-            refresh_active = false;
-            last_refresh_ms = now;
-            // Re-draw current symbol so any updated price shows.
-            if (have_data) redraw_current();
-        }
+    // Run the refresh (one HTTP request, bounded by HTTP_TIMEOUT_MS < loopTask WDT).
+    if (refresh_pending) {
+        bool ok = weather_fetcher::refresh();
+        last_refresh_ms = now;
+        refresh_pending = false;
+        last_fetch_ok   = ok;
+        if (ok) have_data = true;
+        if (have_data) redraw();   // fresh success, or keep last data with stale marker
     }
 
-    stock_fetcher::update_staleness();
+    weather_fetcher::update_staleness(stale_threshold_ms);
 
-    // Auto-advance.
-    if (have_data && now - last_advance_ms >= dwell_ms) {
-        advance(true);
-        last_advance_ms = now;
-    }
-
-    // Buttons.
+    // Buttons. D0 forces a refresh; D1/D2 are unused.
     ButtonEvent ev = buttons::poll();
-    if (ev == BTN_D2_PRESSED) {
-        advance(true);
-        last_advance_ms = now;
-    } else if (ev == BTN_D1_PRESSED) {
-        advance(false);
-        last_advance_ms = now;
-    } else if (ev == BTN_D0_PRESSED) {
-        refresh_active = true;          // force a fresh cycle
-        last_fetch_step_ms = 0;
+    if (ev == BTN_D0_PRESSED) {
+        refresh_pending = true;
     }
 
-    // Status bar (wifi + clock) once a second.
-    if (now - last_status_ms >= 1000) {
-        bool wifi_ok = (WiFi.status() == WL_CONNECTED);
-        if (!wifi_ok) WiFi.reconnect();   // nudge ESP32 auto-reconnect when it stalls
-        ntp.update();
-        String hhmm;
-        if (wifi_ok && ntp.getEpochTime() > 100000) {
-            char buf[8];
-            snprintf(buf, sizeof(buf), "%02d:%02d", ntp.getHours(), ntp.getMinutes());
-            hhmm = buf;
+    // Keep wifi up: when disconnected, re-issue the join periodically (the ESP32's
+    // own auto-reconnect can stall after a longer outage).
+    bool wifi_ok = (WiFi.status() == WL_CONNECTED);
+    if (!wifi_ok && now - last_reconnect_ms >= WIFI_RECONNECT_MS) {
+        Serial.println("[wifi] disconnected -> re-issuing join");
+        WiFi.disconnect(/*wifioff=*/false, /*eraseap=*/false);
+        WiFi.begin();
+        last_reconnect_ms = now;
+    }
+
+    // Wifi indicator tick (1Hz). Only repaint on state change so we don't flicker.
+    if (now - last_indicator_ms >= 1000) {
+        if (wifi_ok != last_wifi_ok) {
+            display::draw_wifi_indicator(wifi_ok);
+            last_wifi_ok = wifi_ok;
         }
-        display::draw_status_bar(wifi_ok, hhmm);
-        last_status_ms = now;
+        last_indicator_ms = now;
     }
 
     delay(10);
